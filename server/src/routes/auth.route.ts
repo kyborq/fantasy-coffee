@@ -7,6 +7,7 @@ import type { AppEnv } from "~/types/hono-env";
 import z from "zod";
 
 import { OtpService } from "~/services/otp.service";
+import { phoneSchema } from "~/utils/phone";
 import { fromDuration } from "~/utils/duration";
 import { valkey } from "~/valkey";
 import { authMiddleware } from "~/middlewares/auth.middleware";
@@ -16,7 +17,7 @@ const otpService = new OtpService();
 const auth = new Hono<AppEnv>();
 
 const signinSchema = z.object({
-  phone: z.string().min(10).max(15),
+  phone: phoneSchema,
 });
 
 auth.post("/signin", zValidator("json", signinSchema), async (c) => {
@@ -31,7 +32,7 @@ auth.post("/signin", zValidator("json", signinSchema), async (c) => {
 });
 
 const verifySchema = z.object({
-  phone: z.string(),
+  phone: phoneSchema,
   code: z.string().length(6),
 });
 
