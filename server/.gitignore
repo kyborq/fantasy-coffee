@@ -1,0 +1,11 @@
+# deps
+node_modules/
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# build / cache
+dist/
+*.tsbuildinfo
