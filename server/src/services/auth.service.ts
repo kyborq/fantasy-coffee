@@ -28,14 +28,27 @@ export class AuthService {
       return { ok: false, cause: "invalid_otp" };
     }
 
-    const [user] = await db
-      .insert(schema.users)
-      .values({ phone })
-      .onConflictDoUpdate({
-        target: schema.users.phone,
-        set: { phone },
-      })
-      .returning();
+    const user = await db.transaction(async (tx) => {
+      const [user] = await tx
+        .insert(schema.users)
+        .values({ phone })
+        .onConflictDoUpdate({
+          target: schema.users.phone,
+          set: { phone },
+        })
+        .returning();
+
+      if (!user) {
+        return null;
+      }
+
+      await tx
+        .insert(schema.loyaltyWallets)
+        .values({ userId: user.id })
+        .onConflictDoNothing({ target: schema.loyaltyWallets.userId });
+
+      return user;
+    });
 
     if (!user) {
       return { ok: false, cause: "user_not_created" };
