@@ -1,19 +1,14 @@
-import { randomBytes } from "node:crypto";
+import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
-import { setCookie, getCookie, deleteCookie } from "hono/cookie";
-
-import type { AppEnv } from "~/types/hono-env";
 import z from "zod";
 
-import { OtpService } from "~/services/otp.service";
-import { phoneSchema } from "~/utils/phone";
-import { fromDuration } from "~/utils/duration";
-import { valkey } from "~/valkey";
+import type { AppEnv } from "~/types/hono-env";
 import { authMiddleware } from "~/middlewares/auth.middleware";
-import { db, schema } from "~/db";
+import { AuthService } from "~/services/auth.service";
+import { phoneSchema } from "~/utils/phone";
 
-const otpService = new OtpService();
+const authService = new AuthService();
 const auth = new Hono<AppEnv>();
 
 const signinSchema = z.object({
@@ -24,9 +19,9 @@ auth.post("/signin", zValidator("json", signinSchema), async (c) => {
   const { phone } = c.req.valid("json");
 
   try {
-    await otpService.requestOtp(phone);
+    await authService.signin(phone);
     return c.json({ message: "OTP sent successfully" }, 200);
-  } catch (e) {
+  } catch {
     return c.json({ error: "Failed to send OTP" }, 500);
   }
 });
@@ -39,51 +34,29 @@ const verifySchema = z.object({
 auth.post("/verify", zValidator("json", verifySchema), async (c) => {
   const { phone, code } = c.req.valid("json");
 
-  const isValid = await otpService.verifyOtp(phone, code);
+  const result = await authService.verify(phone, code);
 
-  if (!isValid) {
-    return c.json({ error: "Invalid or expired code" }, 401);
-  }
-
-  const [user] = await db
-    .insert(schema.users)
-    .values({ phone })
-    .onConflictDoUpdate({
-      target: schema.users.phone,
-      set: { phone },
-    })
-    .returning();
-
-  if (!user) {
+  if (!result.ok) {
+    if (result.cause === "invalid_otp") {
+      return c.json({ error: "Invalid or expired code" }, 401);
+    }
     return c.json({ error: "Could not resolve user" }, 500);
   }
 
-  const sessionToken = randomBytes(24).toString("base64url");
-  const ttlSec = fromDuration("30d");
-
-  await valkey.set(
-    `session:${sessionToken}`,
-    JSON.stringify({ userId: user.id, phone }),
-    "EX",
-    ttlSec,
-  );
-
-  setCookie(c, "session_token", sessionToken, {
+  setCookie(c, "session_token", result.sessionToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "Lax",
-    maxAge: ttlSec,
+    maxAge: result.ttlSec,
     path: "/",
   });
 
-  return c.json({ message: "Authorized", userId: user.id }, 200);
+  return c.json({ message: "Authorized", userId: result.userId }, 200);
 });
 
 auth.post("/logout", authMiddleware, async (c) => {
   const token = getCookie(c, "session_token");
-  if (token) {
-    await valkey.del(`session:${token}`);
-  }
+  await authService.logout(token);
 
   deleteCookie(c, "session_token");
 
