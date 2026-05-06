@@ -2,15 +2,18 @@ import { randomBytes } from "node:crypto";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
+
+import type { AppEnv } from "~/types/hono-env";
 import z from "zod";
 
 import { OtpService } from "~/services/otp.service";
 import { fromDuration } from "~/utils/duration";
 import { valkey } from "~/valkey";
 import { authMiddleware } from "~/middlewares/auth.middleware";
+import { db, schema } from "~/db";
 
 const otpService = new OtpService();
-const auth = new Hono();
+const auth = new Hono<AppEnv>();
 
 const signinSchema = z.object({
   phone: z.string().min(10).max(15),
@@ -41,18 +44,25 @@ auth.post("/verify", zValidator("json", verifySchema), async (c) => {
     return c.json({ error: "Invalid or expired code" }, 401);
   }
 
-  //
-  //  let user = await db.query.users.findFirst({ where: eq(users.phone, phone) });
-  //  if (!user) {
-  //    [user] = await db.insert(users).values({ phone }).returning();
-  //  }
+  const [user] = await db
+    .insert(schema.users)
+    .values({ phone })
+    .onConflictDoUpdate({
+      target: schema.users.phone,
+      set: { phone },
+    })
+    .returning();
+
+  if (!user) {
+    return c.json({ error: "Could not resolve user" }, 500);
+  }
 
   const sessionToken = randomBytes(24).toString("base64url");
   const ttlSec = fromDuration("30d");
 
   await valkey.set(
     `session:${sessionToken}`,
-    JSON.stringify({ userId: "user.id", phone }),
+    JSON.stringify({ userId: user.id, phone }),
     "EX",
     ttlSec,
   );
@@ -65,12 +75,14 @@ auth.post("/verify", zValidator("json", verifySchema), async (c) => {
     path: "/",
   });
 
-  return c.json({ message: "Authorized", userId: "user.id" }, 200);
+  return c.json({ message: "Authorized", userId: user.id }, 200);
 });
 
 auth.post("/logout", authMiddleware, async (c) => {
   const token = getCookie(c, "session_token");
-  // if (token) await redis.del(`session:${token}`);
+  if (token) {
+    await valkey.del(`session:${token}`);
+  }
 
   deleteCookie(c, "session_token");
 

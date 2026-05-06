@@ -1,26 +1,51 @@
+import { getCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
-// import { redis } from "~/redis";
+import z from "zod";
+import { fromDuration } from "~/utils/duration";
+import { tryParseJson } from "~/utils/json";
+import type { AppEnv } from "~/types/hono-env";
+import { valkey } from "~/valkey";
 
-export const authMiddleware = createMiddleware(async (c, next) => {
-  // const token = c.req.cookie("session_token");
-  // if (!token) return c.json({ error: "Unauthorized" }, 401);
+const storedSessionSchema = z.object({
+  userId: z.number(),
+  phone: z.string(),
+});
 
-  // const key = `session:${token}`;
-  // const raw = await redis.get(key);
-  // if (!raw) return c.json({ error: "Session expired or revoked" }, 401);
+export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
+  const token = getCookie(c, "session_token");
+  if (!token) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
 
-  // const session = JSON.parse(raw);
-  // const ttl = await redis.ttl(key);
-  // const maxTtl = 30 * 24 * 60 * 60; // 30 дней в секундах
+  const key = `session:${token}`;
+  const raw = await valkey.get(key);
+  if (!raw) {
+    return c.json({ error: "Session expired or revoked" }, 401);
+  }
 
-  // // Sliding expiration: продлеваем, если осталось < 50% времени
-  // if (ttl > 0 && ttl < maxTtl / 2) {
-  //   await redis.expire(key, maxTtl);
-  // }
+  const rawJson = tryParseJson(raw);
+  if (!rawJson.ok) {
+    return c.json({ error: "Invalid session" }, 401);
+  }
 
-  // c.set("userId", session.userId);
-  // c.set("phone", session.phone);
-  // c.set("sessionId", token);
+  const parsed = storedSessionSchema.safeParse(rawJson.value);
+  if (!parsed.success) {
+    return c.json({ error: "Invalid session" }, 401);
+  }
+
+  const { userId, phone } = parsed.data;
+  const ttl = await valkey.ttl(key);
+  const maxTtl = fromDuration("30d");
+
+  if (ttl > 0 && ttl < maxTtl / 2) {
+    await valkey.expire(key, maxTtl);
+  }
+
+  c.set("user", {
+    id: userId,
+    phone,
+    sessionId: token,
+  });
 
   await next();
 });
